@@ -1,0 +1,497 @@
+/* 
+ * Project Home Monitor Gateway P2
+ * Author: Cameron Haegle
+ * Date: 10/24/2026
+ * For comprehensive documentation and examples, please visit:
+ * https://docs.particle.io/firmware/best-practices/firmware-template/
+ */
+
+#include "Particle.h"
+
+SYSTEM_MODE(MANUAL);
+
+// ==================================================
+// Home Monitoring Network
+// BLE Gateway - Environmental Sensor Client
+//
+// Hardware:
+//   Particle P2 / Photon 2
+//   Adafruit FeatherWing Tripler
+//
+// Device OS: 6.4.1
+// ==================================================
+
+// --------------------------------------------------
+// Configuration
+// --------------------------------------------------
+
+constexpr unsigned long SCAN_INTERVAL_MS = 10000;
+constexpr uint16_t SCAN_TIMEOUT_UNITS = 300;
+
+// --------------------------------------------------
+// BLE UUIDs
+// --------------------------------------------------
+
+const BleUuid HOME_MONITORING_SERVICE(
+    "8b7e0001-6a2d-4c91-9e31-4f2a8c6d1000"
+);
+
+const BleUuid ENVIRONMENTAL_DATA_UUID(
+    "8b7e0002-6a2d-4c91-9e31-4f2a8c6d1000"
+);
+
+// --------------------------------------------------
+// BLE Objects
+// --------------------------------------------------
+
+BlePeerDevice environmentalNode;
+
+BleCharacteristic environmentalCharacteristic;
+
+// --------------------------------------------------
+// Global Variables
+// --------------------------------------------------
+
+unsigned long lastScan = 0;
+
+bool firstScan = true;
+bool wasConnected = false;
+
+// Notification data is received on the BLE thread.
+// Keep the callback short and process data in loop().
+
+uint8_t receivedPayload[8];
+
+volatile bool newMeasurement = false;
+
+// --------------------------------------------------
+// Decode Environmental Measurement
+// --------------------------------------------------
+
+void decodeEnvironmentalData(const uint8_t *data)
+{
+    // Temperature: signed 16-bit, little-endian
+
+    uint16_t tempRaw =
+        (uint16_t)data[0] |
+        ((uint16_t)data[1] << 8);
+
+    int16_t tempEncoded =
+        static_cast<int16_t>(tempRaw);
+
+    // Humidity: unsigned 16-bit, little-endian
+
+    uint16_t humidityEncoded =
+        (uint16_t)data[2] |
+        ((uint16_t)data[3] << 8);
+
+    // Sequence: unsigned 32-bit, little-endian
+
+    uint32_t sequence =
+        (uint32_t)data[4] |
+        ((uint32_t)data[5] << 8) |
+        ((uint32_t)data[6] << 16) |
+        ((uint32_t)data[7] << 24);
+
+    float temperatureC =
+        tempEncoded / 100.0f;
+
+    float temperatureF =
+        temperatureC * 9.0f / 5.0f + 32.0f;
+
+    float humidity =
+        humidityEncoded / 100.0f;
+
+    Serial.println();
+    Serial.println("Environmental Measurement Received");
+    Serial.println("----------------------------------");
+
+    Serial.println("Node: HM-Garage-ENV");
+
+    Serial.printf(
+        "Temperature: %.2f C / %.2f F\r\n",
+        temperatureC,
+
+// ==================================================
+// Home Monitoring Network
+// BLE Gateway - Environmental Sensor Client
+//
+// Hardware:
+//   Particle P2 / Photon 2
+//   Adafruit FeatherWing Tripler
+//
+// Device OS: 6.4.1
+// ==================================================
+
+// --------------------------------------------------
+// Configuration
+// --------------------------------------------------
+
+constexpr unsigned long SCAN_INTERVAL_MS = 10000;
+constexpr uint16_t SCAN_TIMEOUT_UNITS = 300;
+
+// --------------------------------------------------
+// BLE UUIDs
+// --------------------------------------------------
+
+const BleUuid HOME_MONITORING_SERVICE(
+    "8b7e0001-6a2d-4c91-9e31-4f2a8c6d1000"
+);
+
+const BleUuid ENVIRONMENTAL_DATA_UUID(
+    "8b7e0002-6a2d-4c91-9e31-4f2a8c6d1000"
+);
+
+// --------------------------------------------------
+// BLE Objects
+// --------------------------------------------------
+
+BlePeerDevice environmentalNode;
+
+BleCharacteristic environmentalCharacteristic;
+
+// --------------------------------------------------
+// Global Variables
+// --------------------------------------------------
+
+unsigned long lastScan = 0;
+
+bool firstScan = true;
+bool wasConnected = false;
+
+// Notification data is received on the BLE thread.
+// Keep the callback short and process data in loop().
+
+uint8_t receivedPayload[8];
+
+volatile bool newMeasurement = false;
+
+// --------------------------------------------------
+// Decode Environmental Measurement
+// --------------------------------------------------
+
+void decodeEnvironmentalData(const uint8_t *data)
+{
+    // Temperature: signed 16-bit, little-endian
+
+    uint16_t tempRaw =
+        (uint16_t)data[0] |
+        ((uint16_t)data[1] << 8);
+
+    int16_t tempEncoded =
+        static_cast<int16_t>(tempRaw);
+
+    // Humidity: unsigned 16-bit, little-endian
+
+    uint16_t humidityEncoded =
+        (uint16_t)data[2] |
+        ((uint16_t)data[3] << 8);
+
+    // Sequence: unsigned 32-bit, little-endian
+
+    uint32_t sequence =
+        (uint32_t)data[4] |
+        ((uint32_t)data[5] << 8) |
+        ((uint32_t)data[6] << 16) |
+        ((uint32_t)data[7] << 24);
+
+    float temperatureC =
+        tempEncoded / 100.0f;
+
+    float temperatureF =
+        temperatureC * 9.0f / 5.0f + 32.0f;
+        temperatureF
+    );
+
+    Serial.printf(
+        "Humidity:    %.2f %%RH\r\n",
+        humidity
+    );
+
+    Serial.printf(
+        "Sequence:    %lu\r\n",
+        (unsigned long)sequence
+    );
+
+    Serial.printf(
+        "Gateway uptime: %lu seconds\r\n",
+        millis() / 1000
+    );
+}
+
+// --------------------------------------------------
+// BLE Notification Callback
+// --------------------------------------------------
+
+void onEnvironmentalDataReceived(
+    const uint8_t *data,
+    size_t len,
+    const BlePeerDevice &peer,
+    void *context
+)
+{
+    // Expected payload is exactly eight bytes.
+
+    if (len != sizeof(receivedPayload)) {
+        return;
+    }
+
+    // Avoid overwriting a measurement that the
+    // main application has not processed yet.
+
+    if (!newMeasurement) {
+
+        memcpy(
+            receivedPayload,
+            data,
+            sizeof(receivedPayload)
+        );
+
+        newMeasurement = true;
+    }
+}
+
+// --------------------------------------------------
+// Process Pending Measurement
+// --------------------------------------------------
+
+void processMeasurement()
+{
+    if (!newMeasurement) {
+        return;
+    }
+
+    uint8_t payload[8];
+
+    // Protect the shared payload while copying it
+    // from the BLE callback's buffer.
+
+    SINGLE_THREADED_BLOCK() {
+
+        memcpy(
+            payload,
+            receivedPayload,
+            sizeof(payload)
+        );
+
+        newMeasurement = false;
+    }
+
+    decodeEnvironmentalData(payload);
+}
+
+// --------------------------------------------------
+// Connect to Environmental Node
+// --------------------------------------------------
+
+bool connectToNode(const BleAddress &address)
+{
+    Serial.println();
+    Serial.println("Connecting to environmental node...");
+
+    environmentalNode = BLE.connect(address);
+
+    if (!environmentalNode.connected()) {
+
+        Serial.println("ERROR: BLE connection failed");
+
+        return false;
+    }
+
+    Serial.println("BLE connection established");
+
+    Serial.printf(
+        "Address: %s\r\n",
+        address.toString().c_str()
+    );
+
+    // Discover the Environmental Data characteristic.
+
+    Serial.println("Discovering Environmental Data characteristic...");
+
+    bool found =
+        environmentalNode.getCharacteristicByUUID(
+            environmentalCharacteristic,
+            ENVIRONMENTAL_DATA_UUID
+        );
+
+    if (!found) {
+
+        Serial.println(
+            "ERROR: Environmental Data characteristic not found"
+        );
+
+        environmentalNode.disconnect();
+
+        return false;
+    }
+
+    Serial.println("Environmental Data characteristic discovered");
+
+    // Register the notification handler.
+
+    environmentalCharacteristic.onDataReceived(
+        onEnvironmentalDataReceived,
+        nullptr
+    );
+
+    Serial.println("Environmental Data callback registered");
+    Serial.println("Waiting for sensor measurements...");
+
+    wasConnected = true;
+
+    return true;
+}
+
+// --------------------------------------------------
+// Scan for Home Monitoring Nodes
+// --------------------------------------------------
+
+void scanForNodes()
+{
+    Serial.println();
+    Serial.println("Searching for Home Monitoring nodes...");
+
+    BleScanFilter filter;
+
+    filter.serviceUUID(
+        HOME_MONITORING_SERVICE
+    );
+
+    Vector<BleScanResult> results =
+        BLE.scanWithFilter(filter);
+
+    Serial.printf(
+        "Compatible nodes discovered: %d\r\n",
+        results.size()
+    );
+
+    for (int i = 0; i < results.size(); i++) {
+
+        const BleScanResult &result = results[i];
+
+        String name =
+            result.advertisingData().deviceName();
+
+        if (name.length() == 0) {
+
+            name =
+                result.scanResponse().deviceName();
+        }
+
+        if (name.length() == 0) {
+            name = "Unknown";
+        }
+
+        Serial.println();
+        Serial.println("Home Monitoring Node Discovered");
+        Serial.println("-------------------------------");
+
+        Serial.printf(
+            "Name:    %s\r\n",
+            name.c_str()
+        );
+
+        Serial.printf(
+            "Address: %s\r\n",
+            result.address().toString().c_str()
+        );
+
+        Serial.printf(
+            "RSSI:    %d dBm\r\n",
+            result.rssi()
+        );
+
+        // For Phase 2.4, connect only to our
+        // environmental sensor.
+
+        if (name == "HM-Garage-ENV") {
+
+            Serial.println("Environmental sensor identified");
+
+            if (connectToNode(result.address())) {
+                return;
+            }
+        }
+    }
+}
+
+// --------------------------------------------------
+// Setup
+// --------------------------------------------------
+
+void setup()
+{
+    Serial.begin(115200);
+
+    waitFor(Serial.isConnected, 10000);
+
+    Serial.println();
+    Serial.println("================================");
+    Serial.println(" Home Monitoring Network");
+    Serial.println(" Particle P2 BLE Gateway");
+    Serial.println("================================");
+
+    BLE.on();
+
+    BLE.setScanTimeout(
+        SCAN_TIMEOUT_UNITS
+    );
+
+    Serial.println("BLE initialized");
+    Serial.println("Role: Central");
+    Serial.println("Scan interval: 10 seconds");
+    Serial.println("Scan duration: 3 seconds");
+
+    Serial.println();
+    Serial.println("Gateway ready");
+}
+
+// --------------------------------------------------
+// Main Loop
+// --------------------------------------------------
+
+void loop()
+{
+    // Process any received environmental measurement.
+
+    processMeasurement();
+
+    // If connected, remain connected and wait
+    // for notifications.
+
+    if (environmentalNode.connected()) {
+
+        wasConnected = true;
+
+        return;
+    }
+
+    // Detect a lost BLE connection.
+
+    if (wasConnected) {
+
+        Serial.println();
+        Serial.println("Environmental node disconnected");
+        Serial.println("Returning to discovery mode...");
+
+        wasConnected = false;
+
+        // Allow the peripheral time to restart
+        // advertising before attempting reconnection.
+
+        lastScan = millis();
+    }
+
+    // Scan periodically while disconnected.
+
+    if (firstScan ||
+        millis() - lastScan >= SCAN_INTERVAL_MS) {
+
+        firstScan = false;
+
+        lastScan = millis();
+
+        scanForNodes();
+    }
+}
