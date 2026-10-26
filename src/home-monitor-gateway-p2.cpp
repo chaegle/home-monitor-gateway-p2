@@ -9,7 +9,8 @@
 #include "Particle.h"
 #include "Adafruit_SH110X.h"
 
-SYSTEM_MODE(MANUAL);
+SYSTEM_MODE(SEMI_AUTOMATIC);
+// Device OS 6.4.1 enables system threading by default.
 
 // ============================================================
 // Home Monitoring Network - Particle P2 BLE Gateway
@@ -38,6 +39,7 @@ constexpr uint8_t OLED_ADDRESS = 0x3C;
 
 constexpr uint32_t BLE_RETRY_INTERVAL_MS = 3000;
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 1000;
+constexpr uint32_t NETWORK_STATUS_INTERVAL_MS = 10000;
 
 // Measurements become stale after 60 seconds.
 // Stale measurements do not cause a BLE disconnection.
@@ -78,6 +80,7 @@ bool sensorDataValid = false;
 
 uint32_t lastScanTime = 0;
 uint32_t lastOLEDRefresh = 0;
+uint32_t lastNetworkStatusLog = 0;
 uint32_t lastSensorUpdate = 0;
 
 
@@ -203,7 +206,12 @@ void updateOLED()
     // --------------------------------------------------------
 
     display.setCursor(0, 0);
-    display.println("HOME MONITOR");
+    display.print("HOME MONITOR");
+
+    // W = Wi-Fi ready; C = Particle Cloud connected.
+    display.setCursor(98, 0);
+    display.print(WiFi.ready() ? "W" : "-");
+    display.print(Particle.connected() ? "C" : "-");
 
     display.drawLine(
         0,
@@ -628,6 +636,11 @@ void setup()
 
     initializeBLE();
 
+    // Request Wi-Fi and Particle Cloud connectivity after local
+    // monitoring hardware is initialized. Do not wait for cloud.
+    Serial.println("Starting Particle Cloud connection...");
+    Particle.connect();
+
     updateOLED();
 
     // Allow immediate scanning on the first loop.
@@ -647,6 +660,15 @@ void setup()
 
 void loop()
 {
+    // Device OS handles cloud reconnection in semi-automatic mode.
+    // Report connectivity periodically without blocking BLE processing.
+    if (millis() - lastNetworkStatusLog >= NETWORK_STATUS_INTERVAL_MS) {
+        lastNetworkStatusLog = millis();
+        Serial.printf("[Network] Wi-Fi: %s | Cloud: %s\n",
+            WiFi.ready() ? "Ready" : "Offline",
+            Particle.connected() ? "Connected" : "Offline");
+    }
+
     // --------------------------------------------------------
     // Process pending BLE notification
     // --------------------------------------------------------
