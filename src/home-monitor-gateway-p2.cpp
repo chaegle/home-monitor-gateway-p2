@@ -93,6 +93,81 @@ float sensorHumidity = 0.0f;
 
 uint32_t sensorSequence = 0;
 
+// Publish only changed readings, plus a 15-minute heartbeat.
+// Keep the most recent measurement during cloud outages.
+constexpr uint32_t CLOUD_PUBLISH_RETRY_MS = 5000;
+constexpr uint32_t CLOUD_HEARTBEAT_MS = 15UL * 60UL * 1000UL;
+
+int16_t latestTemperatureRaw = 0;
+uint16_t latestHumidityRaw = 0;
+int16_t publishedTemperatureRaw = 0;
+uint16_t publishedHumidityRaw = 0;
+bool havePublishedMeasurement = false;
+bool cloudPublishPending = false;
+bool wasCloudConnected = false;
+uint32_t lastCloudPublishAttempt = 0;
+uint32_t lastCloudPublishTime = 0;
+
+void publishPendingMeasurement()
+{
+    const bool cloudConnected = Particle.connected();
+    if (!cloudConnected) {
+        wasCloudConnected = false;
+        return;
+    }
+
+    // On reconnect, synchronize the latest fresh reading once.
+    if (!wasCloudConnected) {
+        wasCloudConnected = true;
+        if (sensorDataValid) {
+            cloudPublishPending = true;
+        }
+    }
+
+    if (!sensorDataValid ||
+        millis() - lastSensorUpdate > SENSOR_STALE_TIMEOUT_MS) {
+        return; // Never publish an old reading as a current heartbeat.
+    }
+
+    const uint32_t now = millis();
+    const bool changed = !havePublishedMeasurement ||
+        latestTemperatureRaw != publishedTemperatureRaw ||
+        latestHumidityRaw != publishedHumidityRaw;
+    const bool heartbeatDue = havePublishedMeasurement &&
+        now - lastCloudPublishTime >= CLOUD_HEARTBEAT_MS;
+
+    if (!cloudPublishPending && !changed && !heartbeatDue) {
+        return;
+    }
+    if (lastCloudPublishAttempt != 0 &&
+        now - lastCloudPublishAttempt < CLOUD_PUBLISH_RETRY_MS) {
+        return;
+    }
+    lastCloudPublishAttempt = now;
+
+    char payload[160];
+    snprintf(payload, sizeof(payload),
+        "{\"node\":\"HM-Garage-ENV\",\"temperature_c\":%.2f,"
+        "\"humidity\":%.2f,\"sequence\":%lu}",
+        sensorTemperature, sensorHumidity,
+        static_cast<unsigned long>(sensorSequence));
+
+    // Particle.publish acceptance does not guarantee downstream delivery.
+    bool accepted = Particle.publish("hm/garage/env", payload, PRIVATE);
+    if (accepted) {
+        publishedTemperatureRaw = latestTemperatureRaw;
+        publishedHumidityRaw = latestHumidityRaw;
+        havePublishedMeasurement = true;
+        cloudPublishPending = false;
+        lastCloudPublishTime = now;
+        Serial.printf("[Cloud] Published: %s\n", payload);
+    }
+    else {
+        Serial.println("[Cloud] Publish not accepted; will retry");
+    }
+}
+
+
 
 // ============================================================
 // BLE Notification Buffer
@@ -345,6 +420,12 @@ void processSensorPayload(
     sensorTemperature = temperatureRaw / 100.0f;
     sensorHumidity = humidityRaw / 100.0f;
     sensorSequence = sequence;
+    latestTemperatureRaw = temperatureRaw;
+    latestHumidityRaw = humidityRaw;
+    // The sequence counter alone must not trigger a cloud event.
+    cloudPublishPending = !havePublishedMeasurement ||
+        latestTemperatureRaw != publishedTemperatureRaw ||
+        latestHumidityRaw != publishedHumidityRaw;
 
     sensorDataValid = true;
     lastSensorUpdate = millis();
@@ -704,6 +785,9 @@ void loop()
             );
         }
     }
+
+    // Publish the latest new measurement when cloud is available.
+    publishPendingMeasurement();
 
     // --------------------------------------------------------
     // Monitor actual BLE connection
