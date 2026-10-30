@@ -55,6 +55,10 @@ const BleUuid SENSOR_CHARACTERISTIC_UUID(
     "8b7e0002-6a2d-4c91-9e31-4f2a8c6d1000"
 );
 
+// Door peripheral uses a distinct service and characteristic.
+const BleUuid DOOR_SERVICE_UUID("8b7e0011-6a2d-4c91-9e31-4f2a8c6d1000");
+const BleUuid DOOR_CHARACTERISTIC_UUID("8b7e0012-6a2d-4c91-9e31-4f2a8c6d1000");
+
 
 // ============================================================
 // OLED
@@ -74,6 +78,13 @@ bool oledReady = false;
 
 BlePeerDevice sensorPeer;
 BleCharacteristic sensorCharacteristic;
+BlePeerDevice doorPeer;
+BleCharacteristic doorCharacteristic;
+bool doorConnected = false;
+bool doorDataValid = false;
+bool doorOpen = false;
+uint32_t doorSequence = 0;
+uint32_t lastDoorUpdate = 0;
 
 bool sensorConnected = false;
 bool sensorDataValid = false;
@@ -183,6 +194,8 @@ os_mutex_t payloadMutex = nullptr;
 uint8_t pendingPayload[8] = {0};
 
 bool pendingPayloadAvailable = false;
+uint8_t pendingDoorPayload[8] = {0};
+bool pendingDoorPayloadAvailable = false;
 
 
 // ============================================================
@@ -196,6 +209,10 @@ void initializeBLE();
 void scanForSensor();
 bool connectToSensor(const BleScanResult& result);
 void disconnectSensor();
+bool connectToDoor(const BleScanResult& result);
+void doorNotificationHandler(const uint8_t* data, size_t len,
+                             const BlePeerDevice& peer, void* context);
+void processDoorPayload(const uint8_t* data, size_t length);
 
 void sensorNotificationHandler(
     const uint8_t* data,
@@ -381,6 +398,32 @@ void sensorNotificationHandler(
 }
 
 
+// Door notifications share the existing mutex but use a separate buffer.
+void doorNotificationHandler(const uint8_t* data, size_t len,
+                             const BlePeerDevice& peer, void* context)
+{
+    if (data == nullptr || len != 8 || payloadMutex == nullptr) return;
+    os_mutex_lock(payloadMutex);
+    memcpy(pendingDoorPayload, data, 8);
+    pendingDoorPayloadAvailable = true;
+    os_mutex_unlock(payloadMutex);
+}
+
+void processDoorPayload(const uint8_t* data, size_t length)
+{
+    if (data == nullptr || length != 8 || data[0] > 1) return;
+    doorOpen = data[0] == 1;
+    doorSequence = static_cast<uint32_t>(data[4]) |
+        (static_cast<uint32_t>(data[5]) << 8) |
+        (static_cast<uint32_t>(data[6]) << 16) |
+        (static_cast<uint32_t>(data[7]) << 24);
+    doorDataValid = true;
+    lastDoorUpdate = millis();
+    Serial.printf("[Garage DOOR] %s | Seq: %lu\n",
+                  doorOpen ? "OPEN" : "CLOSED",
+                  static_cast<unsigned long>(doorSequence));
+}
+
 // ============================================================
 // Decode Sensor Payload
 // ============================================================
@@ -530,15 +573,19 @@ void scanForSensor()
                 deviceAddress.c_str()
             );
 
-            if (connectToSensor(result)) {
-                return;
+            if (!sensorConnected && connectToSensor(result)) {
+                // Continue searching if door is still missing.
+                if (doorConnected) return;
             }
+        }
+        if (serviceFound && advertisedService == DOOR_SERVICE_UUID && !doorConnected) {
+            if (connectToDoor(result) && sensorConnected) return;
         }
     }
 
-    Serial.println(
-        "No Home Monitoring sensors found"
-    );
+    if (!sensorConnected || !doorConnected) {
+        Serial.println("One or more Home Monitoring nodes not found");
+    }
 }
 
 
@@ -655,6 +702,44 @@ bool connectToSensor(const BleScanResult& result)
     return true;
 }
 
+
+// Establish an independent GATT connection to the door node.
+bool connectToDoor(const BleScanResult& result)
+{
+    Serial.println("[Garage DOOR] Connecting...");
+    doorPeer = BLE.connect(result.address());
+    if (!doorPeer.connected()) {
+        Serial.println("[Garage DOOR] Connection failed");
+        return false;
+    }
+
+    BleCharacteristic characteristics[8];
+    int count = doorPeer.discoverAllCharacteristics(characteristics, 8);
+    bool found = false;
+    for (int i = 0; i < count; ++i) {
+        if (characteristics[i].UUID() == DOOR_CHARACTERISTIC_UUID) {
+            doorCharacteristic = characteristics[i];
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        Serial.println("[Garage DOOR] Characteristic missing");
+        doorPeer.disconnect();
+        return false;
+    }
+    doorCharacteristic.onDataReceived(doorNotificationHandler, nullptr);
+    int err = doorCharacteristic.subscribe(true);
+    if (err != SYSTEM_ERROR_NONE) {
+        Serial.printf("[Garage DOOR] Subscribe failed: %d\n", err);
+        doorPeer.disconnect();
+        return false;
+    }
+    doorConnected = true;
+    doorDataValid = false; // No notification yet; state is UNKNOWN.
+    Serial.println("[Garage DOOR] Connected and subscribed");
+    return true;
+}
 
 // ============================================================
 // Disconnect Handling
@@ -786,6 +871,21 @@ void loop()
         }
     }
 
+    if (payloadMutex != nullptr) {
+        uint8_t doorPayload[8];
+        bool haveDoorPayload = false;
+        os_mutex_lock(payloadMutex);
+        if (pendingDoorPayloadAvailable) {
+            memcpy(doorPayload, pendingDoorPayload, sizeof(doorPayload));
+            pendingDoorPayloadAvailable = false;
+            haveDoorPayload = true;
+        }
+        os_mutex_unlock(payloadMutex);
+        if (haveDoorPayload && doorConnected) {
+            processDoorPayload(doorPayload, sizeof(doorPayload));
+        }
+    }
+
     // Publish the latest new measurement when cloud is available.
     publishPendingMeasurement();
 
@@ -809,11 +909,17 @@ void loop()
         }
     }
 
+    if (doorConnected && !doorPeer.connected()) {
+        Serial.println("[Garage DOOR] BLE connection lost");
+        doorConnected = false;
+        doorDataValid = false;
+    }
+
     // --------------------------------------------------------
     // Reconnect when disconnected
     // --------------------------------------------------------
 
-    if (!sensorConnected) {
+    if (!sensorConnected || !doorConnected) {
 
         if (
             millis() - lastScanTime >=
