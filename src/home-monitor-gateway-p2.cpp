@@ -39,6 +39,7 @@ constexpr uint8_t OLED_ADDRESS = 0x3C;
 
 constexpr uint32_t BLE_RETRY_INTERVAL_MS = 3000;
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 1000;
+constexpr uint32_t OLED_ROTATION_INTERVAL_MS = 10000;
 constexpr uint32_t NETWORK_STATUS_INTERVAL_MS = 10000;
 
 // Measurements become stale after 60 seconds.
@@ -70,6 +71,10 @@ const BleUuid DOOR_CHARACTERISTIC_UUID("8b7e0012-6a2d-4c91-9e31-4f2a8c6d1000");
 Adafruit_SH1107 display(64, 128, &Wire, -1);
 
 bool oledReady = false;
+
+// 0: garage environment; 1: garage door.
+uint8_t oledPage = 0;
+uint32_t lastOLEDPageChange = 0;
 
 
 // ============================================================
@@ -284,87 +289,77 @@ void initializeOLED()
 
 void updateOLED()
 {
-    if (!oledReady) {
-        return;
-    }
+    if (!oledReady) return;
 
     display.clearDisplay();
-
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
 
-    // --------------------------------------------------------
-    // Header
-    // --------------------------------------------------------
-
     display.setCursor(0, 0);
     display.print("HOME MONITOR");
-
-    // W = Wi-Fi ready; C = Particle Cloud connected.
     display.setCursor(98, 0);
     display.print(WiFi.ready() ? "W" : "-");
     display.print(Particle.connected() ? "C" : "-");
+    display.drawLine(0, 12, 127, 12, SH110X_WHITE);
 
-    display.drawLine(
-        0,
-        12,
-        127,
-        12,
-        SH110X_WHITE
-    );
+    if (oledPage == 0) {
+        // Preserve environmental measurements and their freshness status.
+        display.setCursor(0, 16);
+        display.print("Garage: ");
+        if (!sensorConnected) {
+            display.println("Offline");
+        } else if (!sensorDataValid) {
+            display.println("Waiting");
+        } else if (millis() - lastSensorUpdate > SENSOR_STALE_TIMEOUT_MS) {
+            display.println("Stale");
+        } else {
+            display.println("Connected");
+        }
 
-    // --------------------------------------------------------
-    // BLE connection and data status
-    // --------------------------------------------------------
-
-    display.setCursor(0, 16);
-    display.print("Garage: ");
-
-    if (!sensorConnected) {
-        display.println("Offline");
-    }
-    else if (!sensorDataValid) {
-        display.println("Waiting");
-    }
-    else if (
-        millis() - lastSensorUpdate >
-        SENSOR_STALE_TIMEOUT_MS
-    ) {
-        display.println("Stale");
-    }
-    else {
-        display.println("Connected");
-    }
-
-    // --------------------------------------------------------
-    // Sensor measurements
-    // --------------------------------------------------------
-
-    if (sensorDataValid) {
+        if (sensorConnected && sensorDataValid) {
+            display.setCursor(0, 29);
+            display.print("Temp: ");
+            display.print(sensorTemperature, 2);
+            display.println(" C");
+            display.setCursor(0, 41);
+            display.print("RH:   ");
+            display.print(sensorHumidity, 2);
+            display.println(" %");
+            display.setCursor(0, 54);
+            display.print("Seq: ");
+            display.println(sensorSequence);
+        } else {
+            display.setCursor(0, 32);
+            display.println(sensorConnected ? "Waiting for data..." : "Sensor offline");
+        }
+    } else {
+        display.setCursor(0, 16);
+        display.println("Garage Door");
 
         display.setCursor(0, 29);
-        display.print("Temp: ");
-        display.print(sensorTemperature, 2);
-        display.println(" C");
+        display.print("Status: ");
+        if (!doorConnected) {
+            display.println("OFFLINE");
+        } else if (!doorDataValid) {
+            display.println("UNKNOWN");
+        } else {
+            display.println(doorOpen ? "OPEN" : "CLOSED");
+        }
 
         display.setCursor(0, 41);
-        display.print("RH:   ");
-        display.print(sensorHumidity, 2);
-        display.println(" %");
+        display.print("BLE: ");
+        display.println(doorConnected ? "Connected" : "Offline");
 
         display.setCursor(0, 54);
         display.print("Seq: ");
-        display.println(sensorSequence);
+        if (doorConnected && doorDataValid) {
+            display.println(doorSequence);
+        } else {
+            display.println("--");
+        }
     }
-    else {
-
-        display.setCursor(0, 32);
-        display.println("Waiting for data...");
-    }
-
     display.display();
 }
-
 
 // ============================================================
 // BLE Notification Callback
@@ -932,6 +927,13 @@ void loop()
 
             lastScanTime = millis();
         }
+    }
+
+    // Rotate the displayed node every ten seconds without blocking BLE.
+    if (millis() - lastOLEDPageChange >= OLED_ROTATION_INTERVAL_MS) {
+        lastOLEDPageChange = millis();
+        oledPage = (oledPage + 1) % 2;
+        Serial.printf("[OLED] Showing %s\n", oledPage == 0 ? "Garage ENV" : "Garage DOOR");
     }
 
     // --------------------------------------------------------
