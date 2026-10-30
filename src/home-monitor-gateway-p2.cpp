@@ -91,6 +91,14 @@ bool doorOpen = false;
 uint32_t doorSequence = 0;
 uint32_t lastDoorUpdate = 0;
 
+// Door Cloud synchronization is independent of environment publishing.
+// A single pending state is retained, not a history of transitions.
+bool doorCloudPending = false;
+bool doorCloudWasConnected = false;
+bool doorCloudPublished = false;
+bool publishedDoorOpen = false;
+uint32_t lastDoorCloudAttempt = 0;
+
 bool sensorConnected = false;
 bool sensorDataValid = false;
 
@@ -183,6 +191,57 @@ void publishPendingMeasurement()
     }
 }
 
+
+
+// Publish initial state, state changes, and the latest state on Cloud reconnect.
+// No stale or disconnected door reading is presented as a current state.
+void publishPendingDoorState()
+{
+    if (!Particle.connected()) {
+        doorCloudWasConnected = false;
+        return;
+    }
+
+    if (!doorCloudWasConnected) {
+        doorCloudWasConnected = true;
+        if (doorConnected && doorDataValid) {
+            doorCloudPending = true;
+        }
+    }
+
+    if (!doorConnected || !doorDataValid) {
+        return;
+    }
+
+    if (!doorCloudPending && doorCloudPublished &&
+        doorOpen == publishedDoorOpen) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (lastDoorCloudAttempt != 0 &&
+        now - lastDoorCloudAttempt < CLOUD_PUBLISH_RETRY_MS) {
+        return;
+    }
+    lastDoorCloudAttempt = now;
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+        "{\"node\":\"HM-Garage-Door\",\"state\":\"%s\",\"sequence\":%lu}",
+        doorOpen ? "open" : "closed",
+        static_cast<unsigned long>(doorSequence));
+
+    // Acceptance by Particle.publish is not proof of subscriber delivery.
+    const bool accepted = Particle.publish("hm/garage/door", payload, PRIVATE);
+    if (accepted) {
+        publishedDoorOpen = doorOpen;
+        doorCloudPublished = true;
+        doorCloudPending = false;
+        Serial.printf("[Cloud DOOR] Published: %s\n", payload);
+    } else {
+        Serial.println("[Cloud DOOR] Publish not accepted; will retry");
+    }
+}
 
 
 // ============================================================
@@ -407,7 +466,11 @@ void doorNotificationHandler(const uint8_t* data, size_t len,
 void processDoorPayload(const uint8_t* data, size_t length)
 {
     if (data == nullptr || length != 8 || data[0] > 1) return;
-    doorOpen = data[0] == 1;
+    const bool nextDoorOpen = data[0] == 1;
+    if (!doorDataValid || !doorCloudPublished || nextDoorOpen != doorOpen) {
+        doorCloudPending = true;
+    }
+    doorOpen = nextDoorOpen;
     doorSequence = static_cast<uint32_t>(data[4]) |
         (static_cast<uint32_t>(data[5]) << 8) |
         (static_cast<uint32_t>(data[6]) << 16) |
@@ -883,6 +946,7 @@ void loop()
 
     // Publish the latest new measurement when cloud is available.
     publishPendingMeasurement();
+    publishPendingDoorState();
 
     // --------------------------------------------------------
     // Monitor actual BLE connection
